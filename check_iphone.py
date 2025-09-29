@@ -1,88 +1,106 @@
-# check_iphone_dynamic.py
 import requests
-import os
 import time
 import random
+import os
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-PART_NUMBER = "MFYN4X/A"
-POSTAL_CODE = "018972"
-# 改为苹果新加坡官网首页，避免 404
-APPLE_HOMEPAGE = "https://www.apple.com/sg/"
-STOCK_URL = f"https://www.apple.com/sg/shop/fulfillment-messages?parts.0={PART_NUMBER}&location={POSTAL_CODE}"
+API_BASE = "https://www.apple.com/sg/shop/fulfillment-messages"
+PRODUCT_PAGE = "https://www.apple.com/sg/shop/buy-iphone/iphone-17-pro"  # 用这个或苹果主页获取 cookie
 
-# 随机生成 User-Agent
-def random_user_agent():
-    chrome_version = f"{random.randint(100, 140)}.0.{random.randint(4000,5000)}.{random.randint(100,200)}"
-    return f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome_version} Safari/537.36"
+# 你要检测的两个 part numbers
+PARTS = {
+    "Cosmic Orange 256GB": "MFYN4X/A",
+    "Deep Blue 256GB": "MG8J4X/A",
+}
 
-# 发送 Telegram 消息
-def send_telegram(msg):
+# 你可以先搞一个门店列表（store numbers），也可以每次从 pickup-message 接口获取所有店铺
+# 这里先举例一个店铺 R633（Marina Bay Sands）做测试
+STORE_LIST = ["R633"]  # 你可以把整个新加坡的店铺编号加进来
+
+HEADERS_COMMON = {
+    "Accept": "*/*",
+    "Accept-Language": "en,zh-CN;q=0.9,zh;q=0.8",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+}
+
+
+def send_telegram(msg: str):
+    if not BOT_TOKEN or not CHAT_ID:
+        print("⚠️ Telegram token / chat id 未配置")
+        return
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
     try:
-        resp = requests.post(url, data=data, timeout=10)
-        print("🟢 Telegram Status code:", resp.status_code)
+        r = requests.post(url, data=data, timeout=10)
+        print("Telegram status:", r.status_code, "| resp:", r.text)
     except Exception as e:
-        print("❌ Telegram 发送失败:", e)
+        print("Telegram 发送异常：", e)
 
-# 检查库存
-def check_stock():
-    # 随机延迟 3-10 秒，模拟真人操作
-    time.sleep(random.randint(3, 10))
 
-    # 第一步：访问主页获取最新 cookies
+def get_session_with_cookies():
+    """访问产品页或首页获取 cookies"""
     session = requests.Session()
-    headers_home = {
-        "User-Agent": random_user_agent(),
-        "Accept-Language": "en-SG,en;q=0.9"
-    }
+    headers = HEADERS_COMMON.copy()
+    headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    # 随机延迟
+    time.sleep(random.randint(2, 6))
     try:
-        resp_home = session.get(APPLE_HOMEPAGE, headers=headers_home, timeout=10)
-        resp_home.raise_for_status()
-        print("🟢 主页访问成功，Cookies 获取完成")
-    except Exception as e:
-        print("❌ 主页访问失败:", e)
-        return
-
-    # 第二步：请求库存接口
-    headers_stock = {
-        "User-Agent": random_user_agent(),
-        "Accept-Language": "en-SG,en;q=0.9",
-        "Referer": APPLE_HOMEPAGE
-    }
-    try:
-        resp = session.get(STOCK_URL, headers=headers_stock, timeout=10)
+        resp = session.get(PRODUCT_PAGE, headers=headers, timeout=10)
         resp.raise_for_status()
-        data = resp.json()
-
-        stores = data.get("body", {}).get("content", {}).get("pickupMessage", {}).get("stores", [])
-        stock_available = False
-        for store in stores:
-            parts = store.get("partsAvailability", {})
-            part = parts.get(PART_NUMBER, {})
-            buyable = part.get("buyability", {}).get("isBuyable", False)
-            store_name = store.get("storeName")
-            if buyable:
-                stock_available = True
-                print(f"✅ {store_name} 有库存！")
-                send_telegram(f"🍏 iPhone 17 Pro Max 256GB Cosmic Orange 有库存！\n店铺：{store_name}")
-            else:
-                print(f"❌ {store_name} 无库存")
-
-        if not stock_available:
-            print("ℹ️ 当前所有店铺均无库存")
-
-    except requests.exceptions.HTTPError as e:
-        print("❌ HTTPError:", e)
-    except requests.exceptions.RequestException as e:
-        print("❌ 请求异常:", e)
+        print("主页访问成功，cookies 获取完成")
     except Exception as e:
-        print("❌ 其他异常:", e)
+        print("主页访问失败：", e)
+    return session
+
+
+def check_one_part(session, part_number, store):
+    """检测一个 part 在某个 store 的库存"""
+    params = {
+        "fae": "true",
+        "pl": "true",
+        "mts.0": "regular",
+        "mts.1": "compact",
+        "parts.0": part_number,
+        "searchNearby": "true",
+        "store": store,
+    }
+    headers = HEADERS_COMMON.copy()
+    headers["Referer"] = PRODUCT_PAGE
+    try:
+        r = session.get(API_BASE, params=params, headers=headers, timeout=10)
+        print("请求 URL:", r.url)
+        print("状态码:", r.status_code)
+        r.raise_for_status()
+        data = r.json()
+        # 读取库存状态
+        stores_info = data.get("body", {}).get("content", {}).get("pickupMessage", {}).get("stores", [])
+        for st in stores_info:
+            avail = st.get("partsAvailability", {}).get(part_number, {}).get("pickupDisplay")
+            stname = st.get("storeName")
+            print(f"  店铺 {stname}, part {part_number}: {avail}")
+            return avail
+    except Exception as e:
+        print("检测异常：", e)
+    return None
+
+
+def main():
+    session = get_session_with_cookies()
+    for name, part in PARTS.items():
+        print(f"检测型号 —— {name} ({part})")
+        for store in STORE_LIST:
+            status = check_one_part(session, part, store)
+            if status and status.lower() == "available":
+                send_telegram(f"✅ 有库存: {name} 在 店铺 {store}")
+            # else 不通知，也可打印
+        print()
+    print("检查结束")
+
 
 if __name__ == "__main__":
-    print("🟢 开始检查库存...")
-    check_stock()
-    print("🟢 检查结束")
+    print("🟢 开始检查库存…")
+    main()
+    print("🟢 结束")
