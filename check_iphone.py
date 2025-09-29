@@ -1,139 +1,68 @@
-import os
+# check_iphone.py
 import requests
+import os
+import time
+import random
 
-# Apple 官网 API
-CHECK_URL = "https://www.apple.com/sg/shop/fulfillment-messages?parts.0=MFYN4X/A&location=018972"
+# 从 GitHub Secrets 读取
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
+# Apple iPhone 17 Pro Max 256GB Cosmic Orange SG
+PART_NUMBER = "MFYN4X/A"
+POSTAL_CODE = "018972"
+URL = f"https://www.apple.com/sg/shop/fulfillment-messages?parts.0={PART_NUMBER}&location={POSTAL_CODE}"
+
 HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json, text/javascript, */*; q=0.01",
-    "Referer": "https://www.apple.com/sg/shop/buy-iphone",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
+    "Accept-Language": "en-SG,en;q=0.9",
+    "Referer": "https://www.apple.com/sg/iphone-17-pro-max/"
 }
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-LAST_STOCK_FILE = "last_stock.txt"   # 保存上一次库存状态
-FAIL_COUNT_FILE = "fail_count.txt"   # 保存连续失败次数
-FAIL_ALERT_THRESHOLD = 3             # 连续失败阈值，达到后发送一次告警
-
-
-def send_telegram(msg: str):
-    if not BOT_TOKEN or not CHAT_ID:
-        print("Telegram 配置缺失，跳过发送：", msg)
-        return
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": msg}
     try:
-        resp = requests.post(url, data=data, timeout=8)
-        print("📩 推送结果：", resp.status_code)
+        resp = requests.post(url, data=data, timeout=10)
+        print("🟢 Telegram Status code:", resp.status_code)
+        print("🟢 Telegram Response:", resp.text)
     except Exception as e:
-        print("Telegram 推送失败：", e)
-
+        print("❌ Telegram 发送失败:", e)
 
 def check_stock():
+    # 随机延迟 3-10 秒，避免被封
+    time.sleep(random.randint(3, 10))
     try:
-        r = requests.get(CHECK_URL, headers=HEADERS, timeout=10)
-        r.raise_for_status()
-        js = r.json()
+        resp = requests.get(URL, headers=HEADERS, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        stores = data.get("body", {}).get("content", {}).get("pickupMessage", {}).get("stores", [])
+        stock_available = False
+        for store in stores:
+            parts = store.get("partsAvailability", {})
+            part = parts.get(PART_NUMBER, {})
+            buyable = part.get("buyability", {}).get("isBuyable", False)
+            store_name = store.get("storeName")
+            if buyable:
+                stock_available = True
+                print(f"✅ {store_name} 有库存！")
+                send_telegram(f"🍏 iPhone 17 Pro Max 256GB Cosmic Orange 有库存！\n店铺：{store_name}")
+            else:
+                print(f"❌ {store_name} 无库存")
+
+        if not stock_available:
+            print("ℹ️ 当前所有店铺均无库存")
+
+    except requests.exceptions.HTTPError as e:
+        print("❌ HTTPError:", e)
+    except requests.exceptions.RequestException as e:
+        print("❌ 请求异常:", e)
     except Exception as e:
-        print("请求苹果官网失败或被封禁：", e)
-        return None
-
-    try:
-        stores = js["body"]["content"]["pickupMessage"]["stores"]
-        delivery = js["body"]["content"]["deliveryMessage"]["MFYN4X/A"]
-    except Exception as e:
-        print("解析 JSON 结构失败：", e)
-        return None
-
-    results = []
-
-    # 店内库存
-    for st in stores:
-        info = st.get("partsAvailability", {}).get("MFYN4X/A", {})
-        if info.get("pickupDisplay") == "available":
-            results.append(
-                f"✅ 店内现货: {st.get('storeName')}\n"
-                f"地址: {st.get('address', {}).get('address2','')}, {st.get('address', {}).get('postalCode','')}\n"
-                f"电话: {st.get('phoneNumber')}\n"
-                f"预约链接: {st.get('makeReservationUrl')}"
-            )
-
-    # 配送库存
-    try:
-        if delivery.get("regular", {}).get("buyability", {}).get("isBuyable"):
-            date = delivery["regular"]["deliveryOptionMessages"][0]["displayName"]
-            results.append(f"📦 可配送，下单预计送达: {date}")
-    except Exception:
-        pass
-
-    return results
-
-
-def read_last_stock():
-    if os.path.exists(LAST_STOCK_FILE):
-        with open(LAST_STOCK_FILE, "r", encoding="utf-8") as f:
-            return f.read().strip()
-    return None
-
-
-def save_last_stock(stock_msg):
-    with open(LAST_STOCK_FILE, "w", encoding="utf-8") as f:
-        f.write(stock_msg or "")
-
-
-def read_fail_count():
-    if os.path.exists(FAIL_COUNT_FILE):
-        try:
-            with open(FAIL_COUNT_FILE, "r", encoding="utf-8") as f:
-                return int(f.read().strip() or 0)
-        except Exception:
-            return 0
-    return 0
-
-
-def save_fail_count(n):
-    with open(FAIL_COUNT_FILE, "w", encoding="utf-8") as f:
-        f.write(str(int(n)))
-
+        print("❌ 其他异常:", e)
 
 if __name__ == "__main__":
-    is_manual = os.environ.get("GITHUB_EVENT_NAME", "") == "workflow_dispatch"
-
-    result = check_stock()
-
-    if result is None:
-        fail_count = read_fail_count() + 1
-        save_fail_count(fail_count)
-        print(f"请求失败计数：{fail_count}")
-
-        if fail_count >= FAIL_ALERT_THRESHOLD:
-            send_telegram(
-                f"⚠️ iPhone 监控: 连续 {fail_count} 次请求失败（可能被封禁或网络异常）。请人工检查。"
-            )
-            save_fail_count(0)
-        exit(0)
-
-    save_fail_count(0)
-
-    msgs = result
-    msg_combined = "\n\n".join(msgs) if msgs else "当前无库存"
-
-    last_msg = read_last_stock()
-
-    # 第一次运行或者手动触发，都发送库存信息
-    if last_msg is None:
-        save_last_stock(msg_combined)
-        send_telegram(msg_combined)
-        exit(0)
-
-    if msg_combined != last_msg:
-        # 库存变化时发送
-        send_telegram(msg_combined)
-        save_last_stock(msg_combined)
-        print("库存变化，已发送通知")
-    elif is_manual:
-        # 手动触发且库存未变化，也发送一次
-        send_telegram(msg_combined)
-        print("手动触发，库存信息已发送")
-    else:
-        print("库存未变化，不发送消息")
+    print("🟢 开始检查库存...")
+    check_stock()
+    print("🟢 检查结束")
