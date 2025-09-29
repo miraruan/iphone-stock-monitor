@@ -39,7 +39,7 @@ PRODUCT_PAGE = "https://www.apple.com/sg/shop/buy-iphone/iphone-17-pro/6.9-inch-
 
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(⚠️ Telegram 未配置，跳过发送")
+        print("\u26A0 Telegram 未配置，跳过发送")
         return
     try:
         resp = requests.post(
