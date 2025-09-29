@@ -1,0 +1,40 @@
+name: iPhone Stock Monitor
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"  # 每 10 分钟运行一次
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  check_stock:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.11
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Setup ChromeDriver
+        uses: actions/setup-chromedriver@v1
+        with:
+          chromedriver-version: latest
+
+      - name: Run stock check
+        run: python check_stock.py
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
