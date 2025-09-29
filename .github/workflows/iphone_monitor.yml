@@ -1,16 +1,16 @@
 name: iPhone Stock Monitor
 
 on:
-  workflow_dispatch:       # 手动触发
   schedule:
-    - cron: "*/10 * * * *"  # 每 10 分钟执行一次
+    # 每 10 分钟运行一次
+    - cron: "*/10 * * * *"
+  workflow_dispatch: # 支持手动触发
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout code
+      - name: Checkout repo
         uses: actions/checkout@v3
 
       - name: Set up Python
@@ -23,10 +23,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install requests
 
-      - name: Run iPhone stock script
+      - name: Run iPhone Stock Script
         env:
           BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           python check_iphone.py
