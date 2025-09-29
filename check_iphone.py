@@ -9,7 +9,8 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 PART_NUMBER = "MFYN4X/A"
 POSTAL_CODE = "018972"
-APPLE_HOMEPAGE = "https://www.apple.com/sg/iphone-17-pro-max/"
+# 改为苹果新加坡官网首页，避免 404
+APPLE_HOMEPAGE = "https://www.apple.com/sg/"
 STOCK_URL = f"https://www.apple.com/sg/shop/fulfillment-messages?parts.0={PART_NUMBER}&location={POSTAL_CODE}"
 
 # 随机生成 User-Agent
