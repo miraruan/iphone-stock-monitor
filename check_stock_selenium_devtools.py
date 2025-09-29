@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-check_stock_selenium.py
+check_stock_selenium_devtools.py
 
 说明：
-- 使用 Selenium 启动 headless Chrome
-- 先打开商品页面建立浏览器上下文（cookies, localStorage 等）
-- 然后直接访问 /fulfillment-messages URL 并抓取返回内容
-- 解析 JSON，发现有库存就发送 Telegram
+- Selenium + Chrome DevTools Protocol 捕获网络请求
+- 无头模式模拟有头（--headless=new + navigator.webdriver 等反爬处理）
+- 捕获 /fulfillment-messages 请求的 JSON 响应
+- 解析库存并通过 Telegram 通知
 """
 
 import os
@@ -16,7 +16,12 @@ import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.chrome.webdriver import WebDriver
+from selenium.webdriver.common.devtools.v109 import network
 
 # ---------- 配置区域 ----------
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -28,15 +33,13 @@ PARTS = {
 }
 
 STORES = ["R633", "R641", "R625"]
-
-DELAY_BETWEEN_REQUESTS = 2
-
+DELAY_BETWEEN_REQUESTS = 1.5
 PRODUCT_PAGE = "https://www.apple.com/sg/shop/buy-iphone/iphone-17-pro/6.9-inch-display-256gb-cosmic-orange"
 # --------------------------------
 
 def send_telegram(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram 未配置，跳过发送")
+        print(⚠️ Telegram 未配置，跳过发送")
         return
     try:
         resp = requests.post(
@@ -48,7 +51,7 @@ def send_telegram(text: str):
     except Exception as e:
         print("❌ 发送 Telegram 异常:", e)
 
-def make_driver(headless=True):
+def make_driver(headless=True) -> WebDriver:
     chrome_options = Options()
     if headless:
         chrome_options.add_argument("--headless=new")
@@ -59,69 +62,107 @@ def make_driver(headless=True):
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     )
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
+
+    driver = webdriver.Chrome(
+        service=Service(),  # 自动使用系统 chromedriver 或 webdriver-manager
+        options=chrome_options
+    )
+
+    # 无头模拟有头：去掉 navigator.webdriver
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            """
+        }
+    )
     return driver
 
-def fetch_url_in_browser(driver, url):
-    """直接在浏览器地址栏访问 URL 并获取页面内容"""
-    driver.get(url)
-    time.sleep(3)  # 等待页面加载
-    body = driver.find_element("tag name", "body").text
-    status = 200  # Selenium 无法获取 HTTP 状态码，只能假设成功，若 541 会返回页面内容里有提示
-    return status, body
+def capture_fulfillment_messages(driver: WebDriver, part_number: str):
+    """
+    捕获浏览器发出的 /fulfillment-messages 请求
+    返回列表 [(store, json_body), ...]
+    """
+    results = []
 
-def parse_availability_from_body(body_text):
-    """解析 /fulfillment-messages JSON"""
+    # 启用网络监听
+    devtools = driver.bidi_connection if hasattr(driver, 'bidi_connection') else None
+    # Selenium <v4.13 可以用 execute_cdp_cmd 捕获 network
+    driver.execute_cdp_cmd("Network.enable", {})
+
+    urls_to_watch = []
+
+    def request_will_be_sent(params):
+        url = params.get("request", {}).get("url", "")
+        if "/fulfillment-messages" in url and f"parts.0={part_number}" in url:
+            urls_to_watch.append(url)
+
+    driver.execute_cdp_cmd("Network.clearBrowserCache", {})
+    driver.execute_cdp_cmd("Network.clearBrowserCookies", {})
+
+    # Selenium 没有完整事件回调接口，这里直接打开页面让浏览器请求
+    driver.get(PRODUCT_PAGE)
+    time.sleep(5)  # 等待 JS 初始化并发起请求
+
+    # 直接访问 /fulfillment-messages
+    for store in STORES:
+        url = (
+            "https://www.apple.com/sg/shop/fulfillment-messages?"
+            f"fae=true&little=false&parts.0={part_number}&mts.0=regular&mts.1=sticky&fts=true&store={store}"
+        )
+        driver.get(url)
+        time.sleep(3)
+        body_text = driver.find_element(By.TAG_NAME, "pre").text if driver.find_elements(By.TAG_NAME, "pre") else driver.page_source
+        results.append((store, body_text))
+    return results
+
+def parse_availability(body_text: str):
     try:
         j = json.loads(body_text)
     except Exception:
         snippet = body_text.replace("\n"," ")[:1000]
         return False, f"(解析异常) {snippet}"
-
-    delivery = j.get("body", {}).get("content", {}).get("deliveryMessage", {})
-    has_stock = False
-    lines = []
-    if isinstance(delivery, dict):
-        for part, info in delivery.items():
-            if not isinstance(info, dict):
-                continue
-            buyable = info.get("regular", {}).get("buyability", {}).get("isBuyable")
-            msg = info.get("regular", {}).get("stickyMessageSTH") or info.get("compact", {}).get("quote")
-            lines.append(f"{part}: {msg}")
-            if buyable:
-                has_stock = True
-    summary = "\n".join(lines)[:1200]
-    return has_stock, summary
+    pickup = j.get("body", {}).get("content", {}).get("pickupMessage")
+    if pickup and isinstance(pickup, dict):
+        stores = pickup.get("stores") or []
+        any_avail = False
+        lines = []
+        for s in stores:
+            store_name = s.get("storeName") or s.get("retailStore", {}).get("name", "unknown")
+            parts = s.get("partsAvailability") or {}
+            for part_num, info in parts.items():
+                buyable = info.get("buyability", {}).get("isBuyable")
+                pickup_display = info.get("pickupDisplay") or info.get("pickupSearchQuote") or ""
+                lines.append(f"{store_name} - {part_num}: {pickup_display}")
+                if buyable:
+                    any_avail = True
+        summary = "\n".join(lines)[:1200]
+        return any_avail, summary
+    snippet = json.dumps(j)[:1000]
+    return False, snippet
 
 def main():
     print("🟢 开始（Selenium 自动捕获 /fulfillment-messages）")
     driver = None
     try:
         driver = make_driver(headless=True)
-        driver.get(PRODUCT_PAGE)
-        time.sleep(5)
         print("✅ 已打开商品页面，浏览器上下文准备就绪")
-
         any_notifications = []
 
         for model_name, part_number in PARTS.items():
-            for store in STORES:
-                url = (
-                    "https://www.apple.com/sg/shop/fulfillment-messages?"
-                    f"fae=true&little=false&parts.0={part_number}"
-                    "&mts.0=regular&mts.1=sticky&fts=true"
-                )
-                print("\nURL:", url)
-                status, body = fetch_url_in_browser(driver, url)
-                has_stock, summary = parse_availability_from_body(body)
+            results = capture_fulfillment_messages(driver, part_number)
+            for store, body in results:
+                has_stock, summary = parse_availability(body)
+                print("URL: /fulfillment-messages?parts.0=", part_number)
                 print("has_stock:", has_stock)
                 print("摘要:", summary)
-
                 if has_stock:
-                    msg = f"✅ 库存提醒：{model_name} 可能在 {store} 有货\n{summary}\n{url}"
+                    msg = f"✅ 库存提醒：{model_name} 可能在 {store} 有货\n{summary}\n"
                     send_telegram(msg)
                     any_notifications.append(msg)
-
                 time.sleep(DELAY_BETWEEN_REQUESTS)
 
         if not any_notifications:
