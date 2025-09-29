@@ -3,15 +3,15 @@
 check_stock_selenium.py
 
 说明：
-- 使用 webdriver-manager + selenium 启动 headless Chrome
-- 打开商品页面，等待 JS 初始化
-- 通过 DevTools network log 捕获页面发出的 /fulfillment-messages 请求
-- 解析库存信息并在有库存时发送 Telegram
+- 使用 Selenium 启动 headless Chrome
+- 先打开商品页面建立浏览器上下文（cookies, localStorage 等）
+- 然后直接访问 /fulfillment-messages URL 并抓取返回内容
+- 解析 JSON，发现有库存就发送 Telegram
 """
 
+import os
 import time
 import json
-import os
 import requests
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
@@ -27,9 +27,10 @@ PARTS = {
     "Deep Blue 256GB": "MG8J4X/A",
 }
 
-DELAY_BETWEEN_CHECKS = 1.5
+STORES = ["R633", "R641", "R625"]
 
-# 商品页面（建立上下文）
+DELAY_BETWEEN_REQUESTS = 2
+
 PRODUCT_PAGE = "https://www.apple.com/sg/shop/buy-iphone/iphone-17-pro/6.9-inch-display-256gb-cosmic-orange"
 # --------------------------------
 
@@ -58,40 +59,39 @@ def make_driver(headless=True):
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
     )
-
-    # Selenium 4+ 方式开启 performance log
-    chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
-
-    driver = webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
+    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=chrome_options)
     return driver
 
-def parse_fulfillment_from_text(text, part_number):
-    any_avail = False
-    summary_lines = []
+def fetch_url_in_browser(driver, url):
+    """直接在浏览器地址栏访问 URL 并获取页面内容"""
+    driver.get(url)
+    time.sleep(3)  # 等待页面加载
+    body = driver.find_element("tag name", "body").text
+    status = 200  # Selenium 无法获取 HTTP 状态码，只能假设成功，若 541 会返回页面内容里有提示
+    return status, body
 
+def parse_availability_from_body(body_text):
+    """解析 /fulfillment-messages JSON"""
     try:
-        j = json.loads(text)
-        pickup = j.get("body", {}).get("content", {}).get("pickupMessage")
-        if pickup and isinstance(pickup, dict):
-            stores_data = pickup.get("stores") or []
-            for s in stores_data:
-                store_name = s.get("storeName") or s.get("retailStore", {}).get("name", "unknown")
-                parts = s.get("partsAvailability") or {}
-                for pn, info in parts.items():
-                    if pn != part_number:
-                        continue
-                    buyable = info.get("buyability", {}).get("isBuyable")
-                    pickup_display = info.get("pickupDisplay") or info.get("pickupSearchQuote") or ""
-                    summary_lines.append(f"{store_name} - {pn}: {pickup_display}")
-                    if buyable:
-                        any_avail = True
-    except Exception as e:
-        summary_lines.append(f"(解析异常) {str(e)}")
+        j = json.loads(body_text)
+    except Exception:
+        snippet = body_text.replace("\n"," ")[:1000]
+        return False, f"(解析异常) {snippet}"
 
-    return any_avail, "\n".join(summary_lines)[:1200]
+    delivery = j.get("body", {}).get("content", {}).get("deliveryMessage", {})
+    has_stock = False
+    lines = []
+    if isinstance(delivery, dict):
+        for part, info in delivery.items():
+            if not isinstance(info, dict):
+                continue
+            buyable = info.get("regular", {}).get("buyability", {}).get("isBuyable")
+            msg = info.get("regular", {}).get("stickyMessageSTH") or info.get("compact", {}).get("quote")
+            lines.append(f"{part}: {msg}")
+            if buyable:
+                has_stock = True
+    summary = "\n".join(lines)[:1200]
+    return has_stock, summary
 
 def main():
     print("🟢 开始（Selenium 自动捕获 /fulfillment-messages）")
@@ -99,63 +99,37 @@ def main():
     try:
         driver = make_driver(headless=True)
         driver.get(PRODUCT_PAGE)
-        time.sleep(5)  # 等待页面 JS 初始化 cookies
+        time.sleep(5)
         print("✅ 已打开商品页面，浏览器上下文准备就绪")
 
-        # 启动 network tracking
-        driver.execute_cdp_cmd("Network.enable", {})
-
-        seen_requests = set()
         any_notifications = []
 
-        start_time = time.time()
-        # 循环捕获请求，可以设置一个最大等待时间，例如 20 秒
-        while time.time() - start_time < 20:
-            logs = driver.get_log("performance")
-            for entry in logs:
-                try:
-                    message = json.loads(entry["message"])["message"]
-                    method = message.get("method")
-                    if method != "Network.responseReceived":
-                        continue
-                    resp = message.get("params", {}).get("response", {})
-                    url = resp.get("url", "")
-                    if "/fulfillment-messages" not in url or url in seen_requests:
-                        continue
-                    seen_requests.add(url)
+        for model_name, part_number in PARTS.items():
+            for store in STORES:
+                url = (
+                    "https://www.apple.com/sg/shop/fulfillment-messages?"
+                    f"fae=true&little=false&parts.0={part_number}"
+                    "&mts.0=regular&mts.1=sticky&fts=true"
+                )
+                print("\nURL:", url)
+                status, body = fetch_url_in_browser(driver, url)
+                has_stock, summary = parse_availability_from_body(body)
+                print("has_stock:", has_stock)
+                print("摘要:", summary)
 
-                    request_id = message["params"]["requestId"]
-                    body = driver.execute_cdp_cmd("Network.getResponseBody", {"requestId": request_id})
-                    text = body.get("body", "")
+                if has_stock:
+                    msg = f"✅ 库存提醒：{model_name} 可能在 {store} 有货\n{summary}\n{url}"
+                    send_telegram(msg)
+                    any_notifications.append(msg)
 
-                    # 检查每个型号
-                    for model_name, part_number in PARTS.items():
-                        has_stock, summary = parse_fulfillment_from_text(text, part_number)
-                        print(f"URL: {url}")
-                        print(f"has_stock: {has_stock}")
-                        print(f"摘要: {summary}")
-
-                        if has_stock:
-                            msg = f"✅ 库存提醒：{model_name}\n{summary}\n{url}"
-                            print("触发通知 ->", msg)
-                            send_telegram(msg)
-                            any_notifications.append(msg)
-
-                    time.sleep(DELAY_BETWEEN_CHECKS)
-
-                except Exception as e:
-                    print("⚠️ 解析 log 异常:", e)
+                time.sleep(DELAY_BETWEEN_REQUESTS)
 
         if not any_notifications:
             print("🟢 本次未检测到可用库存。")
         print("🟢 检查完成")
-
     finally:
-        try:
-            if driver:
-                driver.quit()
-        except Exception:
-            pass
+        if driver:
+            driver.quit()
 
 if __name__ == "__main__":
     main()
