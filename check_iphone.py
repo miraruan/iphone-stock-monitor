@@ -30,12 +30,6 @@ def send_telegram(msg: str):
 
 
 def check_stock():
-    """
-    返回说明：
-      - None：请求失败（HTTP 非 200 / JSON 解析失败 / 被封等）
-      - []：有效响应，但无库存
-      - [msg1, msg2, ...]：有库存信息的列表
-    """
     try:
         r = requests.get(CHECK_URL, headers=HEADERS, timeout=10)
         r.raise_for_status()
@@ -105,13 +99,9 @@ def save_fail_count(n):
 if __name__ == "__main__":
     is_manual = os.environ.get("GITHUB_EVENT_NAME", "") == "workflow_dispatch"
 
-    if is_manual:
-        send_telegram("⚡ iPhone 库存检查脚本已手动运行")
-
     result = check_stock()
 
     if result is None:
-        # 请求失败
         fail_count = read_fail_count() + 1
         save_fail_count(fail_count)
         print(f"请求失败计数：{fail_count}")
@@ -121,33 +111,29 @@ if __name__ == "__main__":
                 f"⚠️ iPhone 监控: 连续 {fail_count} 次请求失败（可能被封禁或网络异常）。请人工检查。"
             )
             save_fail_count(0)
-        print("请求失败，不修改上次库存状态，等待下一次尝试。")
         exit(0)
 
-    # 请求成功，清零失败计数
     save_fail_count(0)
 
     msgs = result
-    msg_combined = "\n\n".join(msgs) if msgs else ""
+    msg_combined = "\n\n".join(msgs) if msgs else "当前无库存"
 
     last_msg = read_last_stock()
 
+    # 第一次运行或者手动触发，都发送库存信息
     if last_msg is None:
-        print("第一次运行，初始化库存状态")
         save_last_stock(msg_combined)
-        # 手动触发时也显示库存
-        if is_manual:
-            send_telegram(msg_combined if msg_combined else "当前无库存")
+        send_telegram(msg_combined)
         exit(0)
 
-    # 手动触发或库存变化时发送
-    if msg_combined != last_msg or is_manual:
-        if msg_combined:
-            send_telegram(msg_combined)
-            print("检测到库存变化或手动触发，已发送通知")
-        elif is_manual:
-            send_telegram("当前无库存")
-            print("手动触发，当前无库存")
+    if msg_combined != last_msg:
+        # 库存变化时发送
+        send_telegram(msg_combined)
         save_last_stock(msg_combined)
+        print("库存变化，已发送通知")
+    elif is_manual:
+        # 手动触发且库存未变化，也发送一次
+        send_telegram(msg_combined)
+        print("手动触发，库存信息已发送")
     else:
-        print("库存没有变化，不重复提醒")
+        print("库存未变化，不发送消息")
