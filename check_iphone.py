@@ -58,22 +58,33 @@ def read_last_stock():
     if os.path.exists(LAST_STOCK_FILE):
         with open(LAST_STOCK_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
-    return ""
+    return None  # 第一次运行返回 None
 
 def save_last_stock(stock_msg):
     with open(LAST_STOCK_FILE, "w", encoding="utf-8") as f:
         f.write(stock_msg)
 
 if __name__ == "__main__":
+    # 判断是否是手动触发
+    is_manual = os.environ.get("GITHUB_EVENT_NAME", "") == "workflow_dispatch"
+
+    # 手动触发先发提醒
+    if is_manual:
+        send_telegram("⚡ iPhone 库存检查脚本已手动运行")
+
+    # 检查库存
     msgs = check_stock()
-    if msgs:
-        msg = "\n\n".join(msgs)
-        last_msg = read_last_stock()
-        if msg != last_msg:  # 只有库存变化才发消息
-            print(msg)
-            send_telegram(msg)
-            save_last_stock(msg)
-        else:
-            print("库存没有变化，不重复提醒")
+    msg_combined = "\n\n".join(msgs) if msgs else ""
+
+    last_msg = read_last_stock()
+
+    # 第一次运行或库存变化才发送消息
+    if last_msg is None:
+        print("第一次运行，初始化库存状态，不发送库存消息")
+        save_last_stock(msg_combined)
+    elif msg_combined != last_msg:
+        if msg_combined:
+            send_telegram(msg_combined)
+        save_last_stock(msg_combined)
     else:
-        print("暂无库存，跳过通知…")
+        print("库存没有变化，不重复提醒")
