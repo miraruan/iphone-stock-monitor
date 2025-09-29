@@ -13,7 +13,7 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 LAST_STOCK_FILE = "last_stock.txt"   # 保存上一次库存状态
 FAIL_COUNT_FILE = "fail_count.txt"   # 保存连续失败次数
-FAIL_ALERT_THRESHOLD = 3             # 连续失败阈值，达到后发送一次告警（可调整）
+FAIL_ALERT_THRESHOLD = 3             # 连续失败阈值，达到后发送一次告警
 
 
 def send_telegram(msg: str):
@@ -38,7 +38,6 @@ def check_stock():
     """
     try:
         r = requests.get(CHECK_URL, headers=HEADERS, timeout=10)
-        # 如果被网站通过 404 等方式阻断，会在这里抛出 HTTPError
         r.raise_for_status()
         js = r.json()
     except Exception as e:
@@ -71,7 +70,6 @@ def check_stock():
             date = delivery["regular"]["deliveryOptionMessages"][0]["displayName"]
             results.append(f"📦 可配送，下单预计送达: {date}")
     except Exception:
-        # 如果 delivery 结构意外，不要因为这个导致整个函数失败
         pass
 
     return results
@@ -81,7 +79,7 @@ def read_last_stock():
     if os.path.exists(LAST_STOCK_FILE):
         with open(LAST_STOCK_FILE, "r", encoding="utf-8") as f:
             return f.read().strip()
-    return None  # 第一次运行返回 None
+    return None
 
 
 def save_last_stock(stock_msg):
@@ -105,53 +103,51 @@ def save_fail_count(n):
 
 
 if __name__ == "__main__":
-    # 判断是否是手动触发（GitHub Actions 会传入 GITHUB_EVENT_NAME）
     is_manual = os.environ.get("GITHUB_EVENT_NAME", "") == "workflow_dispatch"
+
     if is_manual:
         send_telegram("⚡ iPhone 库存检查脚本已手动运行")
 
     result = check_stock()
 
     if result is None:
-        # 请求失败（404 或解析错误等）
+        # 请求失败
         fail_count = read_fail_count() + 1
         save_fail_count(fail_count)
         print(f"请求失败计数：{fail_count}")
 
-        # 如果达到阈值，发送一次告警（提醒人工查看）
         if fail_count >= FAIL_ALERT_THRESHOLD:
             send_telegram(
                 f"⚠️ iPhone 监控: 连续 {fail_count} 次请求失败（可能被封禁或网络异常）。请人工检查。"
             )
-            # 为避免重复刷屏，这里可以把计数重置到 0 或减小到避免不停发告警
             save_fail_count(0)
-        # **重要**：遇到请求失败**不要**覆盖 last_stock.txt，直接退出
         print("请求失败，不修改上次库存状态，等待下一次尝试。")
         exit(0)
 
-    # 到这里说明请求成功并且 json 解析 OK
-    # 清零失败计数
+    # 请求成功，清零失败计数
     save_fail_count(0)
 
-    msgs = result  # list，可能为空
+    msgs = result
     msg_combined = "\n\n".join(msgs) if msgs else ""
 
     last_msg = read_last_stock()
 
-    # 第一次运行（last_msg 为 None）时，初始化并不发送库存消息
     if last_msg is None:
-        print("第一次运行，初始化库存状态（不发送库存消息）")
+        print("第一次运行，初始化库存状态")
         save_last_stock(msg_combined)
+        # 手动触发时也显示库存
+        if is_manual:
+            send_telegram(msg_combined if msg_combined else "当前无库存")
         exit(0)
 
-    # 如果库存消息发生变化且有库存信息时再发送（避免发送空内容）
-    if msg_combined != last_msg:
+    # 手动触发或库存变化时发送
+    if msg_combined != last_msg or is_manual:
         if msg_combined:
-            send_telegram(msg_combined)  # 只有非空（即确实有货或可配送）才发送
-            print("检测到库存变化并已发送通知")
-        else:
-            # msg_combined 为空，表示当前无货；我们更新记录但不发送（你想只在有货时才通知）
-            print("库存从有变为无（或仍无货），更新状态但不通知")
+            send_telegram(msg_combined)
+            print("检测到库存变化或手动触发，已发送通知")
+        elif is_manual:
+            send_telegram("当前无库存")
+            print("手动触发，当前无库存")
         save_last_stock(msg_combined)
     else:
         print("库存没有变化，不重复提醒")
